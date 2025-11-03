@@ -11,7 +11,8 @@ Features:
 
 import os, time, json, csv, asyncio, requests, traceback
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError, FloodWaitError, RpcError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telethon.errors.rpcerrorlist import RPCError
 
 # ---------------- CONFIG ----------------
 API_ID = 18085901
