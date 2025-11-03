@@ -8,7 +8,7 @@ Run locally on trusted machine for security.
 
 import time, json, os, csv, requests, traceback
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError, FloodWaitError, RpcError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
 
 # ----------------------------- DEFAULTS (EXAMPLES) -----------------------------
 DEFAULT_API_ID = 18085901
