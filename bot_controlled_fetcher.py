@@ -5,8 +5,7 @@ Full script: bot-controlled OTP / 2FA / fetch members / progress + ~15 commands.
 
 import time, json, os, csv, requests, traceback
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError, FloodWaitError, RpcError
-
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
 # ----------------------------- DEFAULTS -----------------------------
 DEFAULT_API_ID = 18085901
 DEFAULT_API_HASH = "baa5a6ca152c717e88ea45f888d3af74"
