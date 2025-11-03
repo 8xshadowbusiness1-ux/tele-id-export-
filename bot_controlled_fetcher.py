@@ -1,51 +1,51 @@
 """
 bot_controlled_fetcher.py
 Full script: bot-controlled OTP / 2FA / fetch members / progress + ~15 commands.
-
-WARNING: Defaults in this file are EXAMPLE values (you provided). Do NOT publish real secrets.
-Run locally on trusted machine for security.
 """
 
 import time, json, os, csv, requests, traceback
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError, RpcError
 
-# ----------------------------- DEFAULTS (EXAMPLES) -----------------------------
+# ----------------------------- DEFAULTS -----------------------------
 DEFAULT_API_ID = 18085901
 DEFAULT_API_HASH = "baa5a6ca152c717e88ea45f888d3af74"
 DEFAULT_PHONE = "+918436452250"
 DEFAULT_BOT_TOKEN = "8254353086:AAEMim12HX44q0XYaFWpbB3J7cxm4VWprEc"
-DEFAULT_USER_CHAT_ID = 1602198875  # your chat id where bot messages are expected
+DEFAULT_USER_CHAT_ID = 1602198875
 DEFAULT_TUTORIAL_ID = -1002647054427
 OUTPUT_CSV = "tutorial_members.csv"
 STATE_FILE = "state.json"
 PROGRESS_BATCH = 500
 GETUPDATES_TIMEOUT = 10
-# -------------------------------------------------------------------------------
+# --------------------------------------------------------------------
 
-# --------------------------- Bot API helper functions ---------------------------
+# --------------------------- BOT API HELPERS ------------------------
 def bot_send(bot_token, chat_id, text):
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     try:
-        r = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=10)
-        return r.ok
+        requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            data={"chat_id": chat_id, "text": text},
+            timeout=10,
+        )
     except Exception as e:
         print("bot_send error:", e)
-        return False
 
 def bot_send_file(bot_token, chat_id, file_path, caption=None):
-    url = f"https://api.telegram.org/bot{bot_token}/sendDocument"
     try:
         with open(file_path, "rb") as f:
             files = {"document": f}
             data = {"chat_id": chat_id}
             if caption:
                 data["caption"] = caption
-            r = requests.post(url, data=data, files=files, timeout=120)
-        return r.ok
+            requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendDocument",
+                data=data,
+                files=files,
+                timeout=120,
+            )
     except Exception as e:
         print("bot_send_file error:", e)
-        return False
 
 def bot_get_updates(bot_token, offset=None, timeout=GETUPDATES_TIMEOUT):
     url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
@@ -55,11 +55,10 @@ def bot_get_updates(bot_token, offset=None, timeout=GETUPDATES_TIMEOUT):
     try:
         r = requests.get(url, params=params, timeout=timeout + 5)
         return r.json()
-    except Exception as e:
-        print("bot_get_updates error:", e)
+    except Exception:
         return {"ok": False, "result": []}
 
-# ------------------------------- State helpers --------------------------------
+# --------------------------- STATE HELPERS --------------------------
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
@@ -75,31 +74,43 @@ def save_state(s):
     except Exception as e:
         print("save_state error:", e)
 
-# ------------------------ Telethon action wrappers (sync) ----------------------
-# We'll create short-lived Telethon clients per action so script stays simple.
+# --------------------------- TELETHON FIXES --------------------------
+
+# --- Fix 1: send_code_request returns a hash, store it ---
 def tele_send_code(api_id, api_hash, phone, session_name="session_bot"):
-    """Sends code request, returns True/False and message."""
+    """Sends code request and saves phone_code_hash."""
     try:
         async def _inner():
             client = TelegramClient(session_name, api_id, api_hash)
             await client.connect()
-            await client.send_code_request(phone)
+            result = await client.send_code_request(phone)
             await client.disconnect()
-        import asyncio; asyncio.run(_inner())
+            return result.phone_code_hash
+        import asyncio
+        phone_code_hash = asyncio.run(_inner())
+        state = load_state()
+        state["phone_code_hash"] = phone_code_hash
+        save_state(state)
         return True, "Code request sent."
     except Exception as e:
         return False, f"send_code error: {e}"
 
+# --- Fix 2: use stored phone_code_hash when signing in ---
 def tele_sign_in_with_code(api_id, api_hash, phone, code, session_name="session_bot"):
-    """Try sign in with code. Return (ok, needs_2fa(bool), message)."""
+    """Try sign in with phone + code + stored hash."""
     try:
         async def _inner():
             client = TelegramClient(session_name, api_id, api_hash)
             await client.connect()
-            try:
-                await client.sign_in(phone, code)
+            state = load_state()
+            phone_code_hash = state.get("phone_code_hash")
+            if not phone_code_hash:
                 await client.disconnect()
-                return (True, False, "Signed in without 2FA.")
+                return (False, False, "Missing phone_code_hash (you must /login again).")
+            try:
+                await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
+                await client.disconnect()
+                return (True, False, "Signed in successfully.")
             except SessionPasswordNeededError:
                 await client.disconnect()
                 return (True, True, "2FA required.")
@@ -109,8 +120,8 @@ def tele_sign_in_with_code(api_id, api_hash, phone, code, session_name="session_
     except Exception as e:
         return False, False, f"sign_in_code error: {e}"
 
+# --- 2FA ---
 def tele_sign_in_with_password(api_id, api_hash, password, session_name="session_bot"):
-    """Complete 2FA sign-in using stored session - Telethon will pick existing session."""
     try:
         async def _inner():
             client = TelegramClient(session_name, api_id, api_hash)
@@ -128,12 +139,8 @@ def tele_sign_in_with_password(api_id, api_hash, password, session_name="session
     except Exception as e:
         return False, f"2FA wrapper error: {e}"
 
+# --- Member Fetch ---
 def tele_fetch_members(api_id, api_hash, tutorial_group, progress_callback=None, session_name="session_bot"):
-    """
-    Fetch all members from tutorial_group.
-    progress_callback(processed_count) will be called periodically.
-    Returns (ok, message, members_list)
-    """
     members = []
     try:
         async def _inner():
@@ -142,8 +149,13 @@ def tele_fetch_members(api_id, api_hash, tutorial_group, progress_callback=None,
             processed = 0
             try:
                 async for user in client.iter_participants(tutorial_group, aggressive=True):
-                    processed_nonlocal_append = (user.id, getattr(user, "username", "") or "", getattr(user, "first_name", "") or "", getattr(user, "last_name", "") or "", getattr(user, "phone", "") or "")
-                    members.append(processed_nonlocal_append)
+                    members.append((
+                        user.id,
+                        getattr(user, "username", "") or "",
+                        getattr(user, "first_name", "") or "",
+                        getattr(user, "last_name", "") or "",
+                        getattr(user, "phone", "") or "",
+                    ))
                     processed_local = len(members)
                     if progress_callback and processed_local % PROGRESS_BATCH == 0:
                         progress_callback(processed_local)
@@ -161,9 +173,8 @@ def tele_fetch_members(api_id, api_hash, tutorial_group, progress_callback=None,
     except Exception as e:
         return False, f"fetch wrapper error: {e}", members
 
-# ----------------------------- Command handling --------------------------------
+# --------------------------- COMMAND HANDLER --------------------------
 def process_command(cmd_text, from_chat_id, config):
-    """Main command router. cmd_text is raw text from user."""
     state = load_state()
     bot_token = config["bot_token"]
     api_id = config["api_id"]
@@ -171,7 +182,6 @@ def process_command(cmd_text, from_chat_id, config):
     phone = config["phone"]
     tutorial_group = config["tutorial_id"]
 
-    # helper to send and log
     def reply(text):
         print(f"Reply to {from_chat_id}: {text}")
         bot_send(bot_token, from_chat_id, text)
@@ -179,252 +189,155 @@ def process_command(cmd_text, from_chat_id, config):
     text = cmd_text.strip()
     lower = text.lower()
 
-    # Basic commands
     if lower.startswith("/hello") or lower.startswith("/start"):
-        reply("Hello! Main ready hoon. Commands ke liye /help type karo.")
+        reply("Hello Vishal! Main ready hoon 😎\nCommands ke liye /help likho.")
         return
 
     if lower.startswith("/help"):
         reply(
             "Commands:\n"
-            "/login - Trigger OTP request\n"
-            "/otp <code> or just send code - Verify OTP\n"
-            "/2fa <password> or just send password - Send 2-step password\n"
-            "/fetch - Start fetching tutorial members\n"
-            "/pause - Pause current fetch (if running)\n"
-            "/resume - Resume fetch (not implemented fancy; restart)\n"
+            "/login - Send OTP\n"
+            "/otp <code> - Verify OTP\n"
+            "/2fa <password> - 2FA login\n"
+            "/fetch - Fetch tutorial members\n"
+            "/users_count - Show how many fetched\n"
+            "/sendfile - Send last CSV\n"
             "/status - Show current state\n"
-            "/sendfile - Re-send last CSV\n"
-            "/users_count - Show how many fetched so far\n"
-            "/stop - Stop any running fetch\n"
-            "/ping - ping\n"
-            "/cancel - cancel waiting for otp/2fa\n"
-            "/restart - restart script (manual)\n"
-            "/help - show this"
+            "/stop - Stop fetching\n"
+            "/ping - Check bot\n"
         )
         return
 
     if lower.startswith("/ping"):
-        reply("Pong! Time: " + time.strftime("%Y-%m-%d %H:%M:%S"))
+        reply("💓 Pong! Time: " + time.strftime("%Y-%m-%d %H:%M:%S"))
         return
 
-    # /login: trigger code request
     if lower.startswith("/login"):
         ok, msg = tele_send_code(api_id, api_hash, phone)
         if ok:
             state["awaiting_otp"] = True
             state["awaiting_2fa"] = False
             save_state(state)
-            reply("OTP request bhej diya. Jab code aaye to is chat me /otp <code> ya sirf <code> bhej do.")
+            reply("📱 OTP bhej diya! Jab code aaye to /otp <code> likho.")
         else:
             reply("OTP request failed: " + msg)
         return
 
-    # /otp handling: either "/otp 12345" or just "12345"
     if lower.startswith("/otp") or (state.get("awaiting_otp") and text.isdigit()):
         parts = text.split()
-        code = parts[1] if len(parts) > 1 and parts[0].lower() == "/otp" else (parts[0] if parts[0].isdigit() else None)
-        if not code:
-            reply("OTP format invalid. Use /otp 12345 or paste only the digits.")
-            return
-        reply("OTP mila. Trying to sign in...")
+        code = parts[1] if len(parts) > 1 and parts[0].lower() == "/otp" else parts[0]
+        reply("🔐 Verifying OTP...")
         ok, needs_2fa, msg = tele_sign_in_with_code(api_id, api_hash, phone, code)
         if not ok:
-            reply("Sign-in failed: " + msg)
-            state.pop("awaiting_otp", None)
-            save_state(state)
+            reply("❌ Sign-in failed: " + msg)
             return
         if needs_2fa:
             state["awaiting_2fa"] = True
-            state.pop("awaiting_otp", None)
             save_state(state)
-            reply("Account needs 2FA. Send /2fa <password> or just paste your password in chat.")
-            return
-        # success
-        state["logged_in"] = True
-        state.pop("awaiting_otp", None)
-        state.pop("awaiting_2fa", None)
-        save_state(state)
-        reply("Login successful. You can now /fetch members.")
+            reply("⚠️ 2FA required. Use /2fa <password>.")
+        else:
+            state["logged_in"] = True
+            save_state(state)
+            reply("✅ Login successful! Now you can /fetch members.")
         return
 
-    # /2fa handling: either "/2fa pass" or direct text when awaiting_2fa
     if lower.startswith("/2fa") or (state.get("awaiting_2fa") and len(text) > 0):
         parts = text.split(maxsplit=1)
-        pwd = parts[1] if parts[0].lower() == "/2fa" and len(parts) > 1 else (text if state.get("awaiting_2fa") else None)
-        if not pwd:
-            reply("2FA password missing. Use /2fa <password> or paste password.")
-            return
-        reply("Trying 2FA sign-in...")
+        pwd = parts[1] if parts[0].lower() == "/2fa" and len(parts) > 1 else text
+        reply("🔐 Trying 2FA...")
         ok, msg = tele_sign_in_with_password(api_id, api_hash, pwd)
         if ok:
             state["logged_in"] = True
-            state.pop("awaiting_2fa", None)
             save_state(state)
-            reply("2FA success. You can /fetch members now.")
+            reply("✅ 2FA success. You can /fetch members now.")
         else:
-            reply("2FA failed: " + msg)
+            reply("❌ 2FA failed: " + msg)
         return
 
-    # /fetch: start fetching members (runs blocking until done)
     if lower.startswith("/fetch"):
         if not state.get("logged_in"):
-            reply("Not logged in yet. Use /login first.")
+            reply("⚠️ Not logged in. Use /login first.")
             return
 
-        # set running flag
         state["fetching"] = True
         save_state(state)
-        reply("Fetch starting... I will send progress messages every {} members.".format(PROGRESS_BATCH))
+        reply("🚀 Fetching members...")
 
-        def progress_cb(processed_count):
-            reply(f"Processed {processed_count} members so far...")
+        def progress_cb(c):
+            reply(f"📊 Processed {c} members so far...")
 
         ok, msg, members = tele_fetch_members(api_id, api_hash, tutorial_group, progress_callback=progress_cb)
         if not ok:
-            reply("Fetch failed: " + msg)
-            state.pop("fetching", None)
+            reply("❌ Fetch failed: " + msg)
+            state["fetching"] = False
             save_state(state)
             return
 
-        # Save CSV
-        try:
-            with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
-                w = csv.writer(f)
-                w.writerow(["user_id", "username", "first_name", "last_name", "phone"])
-                for (uid, uname, fname, lname, phonev) in members:
-                    w.writerow([uid, uname, fname, lname, phonev])
-            reply(f"Fetch done. Total: {len(members)}. Sending CSV...")
-            sent = bot_send_file(bot_token, from_chat_id, OUTPUT_CSV, caption="Tutorial members CSV")
-            if sent:
-                reply("CSV sent successfully.")
-            else:
-                reply("CSV send failed. Check logs.")
-        except Exception as e:
-            reply("Error saving/sending CSV: " + str(e))
-        state.pop("fetching", None)
+        with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["user_id", "username", "first_name", "last_name", "phone"])
+            for m in members:
+                w.writerow(m)
+
+        bot_send_file(bot_token, from_chat_id, OUTPUT_CSV, "Tutorial Members CSV")
+        reply(f"✅ Fetch done! Total {len(members)} members.")
+        state["fetching"] = False
         save_state(state)
         return
 
-    # /users_count - show how many fetched so far (if CSV exists)
     if lower.startswith("/users_count"):
         if os.path.exists(OUTPUT_CSV):
-            try:
-                with open(OUTPUT_CSV, "r", encoding="utf-8") as f:
-                    cnt = sum(1 for _ in f) - 1
-                reply(f"CSV exists. Rows (excluding header): {cnt}")
-            except Exception as e:
-                reply("Error reading CSV: " + str(e))
+            cnt = sum(1 for _ in open(OUTPUT_CSV, "r", encoding="utf-8")) - 1
+            reply(f"📄 Total {cnt} users in CSV.")
         else:
-            reply("No CSV found yet.")
-        return
-
-    if lower.startswith("/sendfile"):
-        if os.path.exists(OUTPUT_CSV):
-            ok = bot_send_file(bot_token, from_chat_id, OUTPUT_CSV, caption="Requested CSV")
-            if ok:
-                reply("CSV re-sent.")
-            else:
-                reply("CSV send failed.")
-        else:
-            reply("No CSV to send.")
-        return
-
-    if lower.startswith("/pause"):
-        # simple implementation: set fetching flag false (won't interrupt running tele_fetch since it's blocking)
-        reply("Pause requested. Note: if a fetch is already running it may not stop immediately.")
-        state["pause_requested"] = True
-        save_state(state)
-        return
-
-    if lower.startswith("/resume"):
-        reply("Resume: re-run /fetch to restart fetching (resume not fully automatic in this simple script).")
-        return
-
-    if lower.startswith("/stop"):
-        # set a stop flag - tele_fetch in this simple script won't check frequently; we notify user.
-        state["stop_requested"] = True
-        save_state(state)
-        reply("Stop requested. If a fetch is running, it may still finish the current batch.")
+            reply("No CSV yet.")
         return
 
     if lower.startswith("/status"):
-        st = load_state()
-        reply("Current state: " + json.dumps(st, indent=2))
+        reply("📊 Current state:\n" + json.dumps(load_state(), indent=2))
         return
 
-    if lower.startswith("/cancel"):
-        state.pop("awaiting_otp", None)
-        state.pop("awaiting_2fa", None)
-        save_state(state)
-        reply("Cancelled waiting for OTP/2FA.")
-        return
+    reply("❓ Unknown command. Type /help.")
 
-    if lower.startswith("/restart"):
-        reply("You asked to restart the script. Please manually restart the process.")
-        return
-
-    # Unknown command: treat as potential OTP or 2FA if awaiting
-    if state.get("awaiting_otp") and text.isdigit():
-        process_command("/otp " + text, from_chat_id, config)
-        return
-    if state.get("awaiting_2fa"):
-        process_command("/2fa " + text, from_chat_id, config)
-        return
-
-    reply("Unknown command or text. Type /help for command list.")
-
-
-# ---------------------------- Main polling loop --------------------------------
+# ---------------------------- MAIN LOOP ----------------------------
 def main_loop():
     print("=== Bot-controlled fetcher starting ===")
-    # Load config or use defaults
     config = {
         "api_id": DEFAULT_API_ID,
         "api_hash": DEFAULT_API_HASH,
         "phone": DEFAULT_PHONE,
         "bot_token": DEFAULT_BOT_TOKEN,
         "user_chat_id": DEFAULT_USER_CHAT_ID,
-        "tutorial_id": DEFAULT_TUTORIAL_ID
+        "tutorial_id": DEFAULT_TUTORIAL_ID,
     }
 
-    print("Using defaults (you can change file to override).")
-    print("Bot token:", config["bot_token"][:10] + "..." )  # hide full token in console
-
-    # We'll poll getUpdates and process messages from the configured user_chat_id
     offset = None
-    print("Polling bot getUpdates... Send /hello to your bot from your phone.")
+    print("Polling Telegram updates...")
+
     while True:
         try:
-            data = bot_get_updates(config["bot_token"], offset=offset, timeout=GETUPDATES_TIMEOUT)
+            data = bot_get_updates(config["bot_token"], offset=offset)
             if not data.get("ok"):
                 time.sleep(1)
                 continue
             for upd in data.get("result", []):
                 offset = upd["update_id"] + 1
-                msg = upd.get("message") or upd.get("edited_message")
+                msg = upd.get("message")
                 if not msg:
                     continue
-                chat = msg.get("chat", {})
-                chat_id = chat.get("id")
-                text = (msg.get("text") or "").strip()
-                print(f"Update from {chat_id}: {text[:100]}")
-                # Only accept commands from configured user_chat_id for safety
+                chat_id = msg["chat"]["id"]
+                text = msg.get("text", "")
+                print(f"From {chat_id}: {text}")
                 if str(chat_id) != str(config["user_chat_id"]):
-                    bot_send(config["bot_token"], chat_id, "This bot is private. Use the configured account.")
+                    bot_send(config["bot_token"], chat_id, "🚫 Private bot. Unauthorized access.")
                     continue
-                # Process command
-                try:
-                    process_command(text, chat_id, config)
-                except Exception as e:
-                    traceback.print_exc()
-                    bot_send(config["bot_token"], chat_id, "Error processing command: " + str(e))
-            time.sleep(0.5)
+                process_command(text, chat_id, config)
+            time.sleep(1)
         except KeyboardInterrupt:
-            print("Interrupted by user. Exiting.")
+            print("🛑 Exiting.")
             break
         except Exception as e:
-            print("Main loop exception:", e)
+            print("Main loop error:", e)
             time.sleep(2)
 
 if __name__ == "__main__":
