@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-✅ Final Render-Safe Telegram Member Bot
+✅ Final Render-Safe Telegram Member Bot (Unlimited Fetch)
 Features:
 - /login, /otp, /2fa (with persistent phone_code_hash)
-- /fetch members (with progress + CSV)
+- /fetch members (with pagination up to 100k+)
 - Auto ping every 10 min
 - Auto keep-alive session (never logs out)
-- FloodWait auto pause
+- FloodWait auto pause (safe)
 """
 
-import os, time, json, csv, asyncio, requests, traceback
+import os, time, json, csv, asyncio, requests, traceback, random
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
-from telethon.errors.rpcerrorlist import RPCError
 
 # ---------------- CONFIG ----------------
 API_ID = 18085901
@@ -24,7 +23,7 @@ TUTORIAL_ID = -1002647054427
 OUTPUT_CSV = "tutorial_members.csv"
 STATE_FILE = "state.json"
 PROGRESS_BATCH = 500
-PING_URL = "https://teleautomation-by9o.onrender.com"  # <── apna render URL daalo
+PING_URL = "https://teleautomation-by9o.onrender.com"  # 🔗 Apna Render URL yahan daalna
 # ----------------------------------------
 
 # ---------- HELPERS ----------
@@ -58,7 +57,7 @@ def load_state():
 def save_state(s):
     json.dump(s, open(STATE_FILE, "w"), indent=2)
 
-# ---------- TELETHON FIXED LOGIN ----------
+# ---------- TELETHON LOGIN ----------
 def tele_send_code():
     try:
         async def inner():
@@ -86,7 +85,6 @@ def tele_sign_in_with_code(code):
             st = load_state()
             hashv = st.get("phone_code_hash")
             if not hashv or (int(time.time()) - st.get("hash_timestamp", 0)) > 600:
-                # auto resend OTP if expired
                 result = await c.send_code_request(PHONE)
                 st["phone_code_hash"] = result.phone_code_hash
                 st["hash_timestamp"] = int(time.time())
@@ -124,23 +122,35 @@ def tele_sign_in_with_password(pwd):
     except Exception as e:
         return False, f"2FA error: {e}"
 
-# ---------- FETCH MEMBERS ----------
+# ---------- FETCH MEMBERS (Paginated 100k+) ----------
 def tele_fetch_members(progress_cb=None):
     members = []
     try:
         async def inner():
             c = TelegramClient("session_bot", API_ID, API_HASH)
             await c.connect()
-            async for user in c.iter_participants(TUTORIAL_ID, aggressive=True):
-                members.append([
-                    user.id,
-                    getattr(user, "username", "") or "",
-                    getattr(user, "first_name", "") or "",
-                    getattr(user, "last_name", "") or "",
-                    getattr(user, "phone", "") or "",
-                ])
-                if len(members) % PROGRESS_BATCH == 0 and progress_cb:
-                    progress_cb(len(members))
+            offset = 0
+            limit = 200
+            total = 0
+
+            while True:
+                participants = await c.get_participants(TUTORIAL_ID, offset=offset, limit=limit)
+                if not participants:
+                    break
+                for user in participants:
+                    members.append([
+                        user.id,
+                        getattr(user, "username", "") or "",
+                        getattr(user, "first_name", "") or "",
+                        getattr(user, "last_name", "") or "",
+                        getattr(user, "phone", "") or "",
+                    ])
+                offset += len(participants)
+                total += len(participants)
+                if progress_cb and total % PROGRESS_BATCH == 0:
+                    progress_cb(total)
+                await asyncio.sleep(random.uniform(1.5, 3))  # safe delay to prevent flood
+
             await c.disconnect()
         asyncio.run(inner())
         return True, f"Fetched {len(members)} members.", members
@@ -188,15 +198,15 @@ def process_cmd(text):
         ok, msg = tele_sign_in_with_password(parts[1]); bot_send(msg); return
     if lower.startswith("/fetch"):
         if not st.get("logged_in"): bot_send("Login first."); return
-        bot_send("Fetching members..."); 
-        def cb(cnt): bot_send(f"Fetched {cnt} so far...")
+        bot_send("Fetching members... Please wait ⏳")
+        def cb(cnt): bot_send(f"✅ Fetched {cnt} so far...")
         ok, msg, members = tele_fetch_members(cb)
         if not ok: bot_send("Error: " + msg); return
         with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f); w.writerow(["id","username","fname","lname","phone"])
             w.writerows(members)
         bot_send_file(OUTPUT_CSV, "Tutorial members CSV")
-        bot_send(f"✅ Done {len(members)} users.")
+        bot_send(f"✅ Done! Total {len(members)} users fetched.")
         return
     if lower.startswith("/status"):
         bot_send(json.dumps(st, indent=2))
