@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-✅ Final Render-Safe Telegram Member Bot (v3)
-✔️ Uses iter_participants() — safe & 85k+ fetch
-✔️ Handles OTP + 2FA + auto flood wait
-✔️ Auto ping every 10 min (keep alive)
-✔️ Works perfectly on Render (no port bind)
+✅ Final Telegram Member Fetcher (85k+ support, safe mode)
+✔️ Auto FloodWait handle (pause then continue)
+✔️ Resume from last fetched user
+✔️ Slow-safe delay (1–5 sec) prevents bans
+✔️ Works perfectly on Render (no port binding)
 """
 
 import os, time, json, csv, asyncio, random, threading, requests, traceback
@@ -21,10 +21,9 @@ TUTORIAL_ID = -1002647054427
 OUTPUT_CSV = "tutorial_members.csv"
 STATE_FILE = "state.json"
 PROGRESS_BATCH = 500
-PING_URL = "https://teleautomation-by9o.onrender.com"  # <-- Your Render ping URL
+PING_URL = "https://teleautomation-by9o.onrender.com"
 # ----------------------------------------
 
-# ---------- HELPERS ----------
 def bot_send(text):
     try:
         requests.post(
@@ -56,28 +55,23 @@ def load_state():
 def save_state(s):
     json.dump(s, open(STATE_FILE, "w", encoding="utf-8"), indent=2)
 
-# ---------- TELETHON LOGIN ----------
+# ---------- TELEGRAM LOGIN ----------
 def tele_send_code():
     try:
         async def inner():
             c = TelegramClient("session_bot", API_ID, API_HASH)
             await c.connect()
-            result = await c.send_code_request(PHONE)
+            r = await c.send_code_request(PHONE)
             await c.disconnect()
-            return getattr(result, "phone_code_hash", None)
-        code_hash = asyncio.run(inner())
-        if not code_hash:
-            bot_send("❌ No phone_code_hash received.")
-            return False
+            return getattr(r, "phone_code_hash", None)
+        hashv = asyncio.run(inner())
         s = load_state()
-        s["phone_code_hash"] = code_hash
+        s["phone_code_hash"] = hashv
         s["hash_time"] = int(time.time())
         save_state(s)
-        bot_send("📲 OTP sent. Use /otp <code>")
-        return True
+        bot_send("📲 OTP sent! Use /otp <code>")
     except Exception as e:
         bot_send(f"❌ send_code error: {e}")
-        return False
 
 def tele_sign_in_with_code(code):
     try:
@@ -85,18 +79,16 @@ def tele_sign_in_with_code(code):
             c = TelegramClient("session_bot", API_ID, API_HASH)
             await c.connect()
             s = load_state()
-            ph_hash = s.get("phone_code_hash")
-            if not ph_hash or (int(time.time()) - s.get("hash_time", 0)) > 600:
-                result = await c.send_code_request(PHONE)
-                s["phone_code_hash"] = getattr(result, "phone_code_hash", "")
-                s["hash_time"] = int(time.time())
+            hashv = s.get("phone_code_hash")
+            if not hashv:
+                r = await c.send_code_request(PHONE)
+                s["phone_code_hash"] = getattr(r, "phone_code_hash", "")
                 save_state(s)
                 await c.disconnect()
-                return (False, False, "OTP expired. New code sent.")
+                return (False, False, "Code expired. Sent again.")
             try:
-                await c.sign_in(phone=PHONE, code=code, phone_code_hash=ph_hash)
+                await c.sign_in(PHONE, code, phone_code_hash=hashv)
                 s["logged_in"] = True
-                s.pop("phone_code_hash", None)
                 save_state(s)
                 await c.disconnect()
                 return (True, False, "✅ Login successful.")
@@ -106,7 +98,7 @@ def tele_sign_in_with_code(code):
         ok, need2fa, msg = asyncio.run(inner())
         return ok, need2fa, msg
     except Exception as e:
-        return False, False, str(e)
+        return False, False, f"Error: {e}"
 
 def tele_sign_in_with_password(pwd):
     try:
@@ -123,7 +115,7 @@ def tele_sign_in_with_password(pwd):
     except Exception as e:
         return False, str(e)
 
-# ---------- FETCH MEMBERS (Full 85k+ safe) ----------
+# ---------- FETCH MEMBERS ----------
 def tele_fetch_members(progress_cb=None):
     members = []
     try:
@@ -132,113 +124,130 @@ def tele_fetch_members(progress_cb=None):
             await c.connect()
             if not await c.is_user_authorized():
                 raise Exception("Not logged in.")
-            count = 0
-            async for user in c.iter_participants(TUTORIAL_ID, aggressive=True):
-                members.append([
-                    user.id,
-                    getattr(user, "username", "") or "",
-                    getattr(user, "first_name", "") or "",
-                    getattr(user, "last_name", "") or "",
-                    getattr(user, "phone", "") or "",
-                ])
-                count += 1
-                if progress_cb and count % PROGRESS_BATCH == 0:
-                    progress_cb(count)
-                if count % 1000 == 0:
-                    await asyncio.sleep(random.uniform(1.5, 3))  # flood safety
+
+            s = load_state()
+            offset_id = s.get("last_offset", 0)
+            limit = 200
+            total = s.get("last_count", 0)
+
+            bot_send(f"🔁 Resuming from offset {offset_id} ({total} users)")
+
+            while True:
+                try:
+                    participants = await c.get_participants(
+                        TUTORIAL_ID, offset_id=offset_id, limit=limit
+                    )
+                    if not participants:
+                        break
+
+                    for user in participants:
+                        members.append([
+                            user.id,
+                            getattr(user, "username", "") or "",
+                            getattr(user, "first_name", "") or "",
+                            getattr(user, "last_name", "") or "",
+                            getattr(user, "phone", "") or "",
+                        ])
+
+                    total += len(participants)
+                    offset_id = participants[-1].id
+                    s["last_offset"] = offset_id
+                    s["last_count"] = total
+                    save_state(s)
+
+                    if progress_cb and total % PROGRESS_BATCH == 0:
+                        progress_cb(total)
+
+                    await asyncio.sleep(random.uniform(1.5, 5.0))
+
+                except FloodWaitError as fw:
+                    wait = fw.seconds + 5
+                    bot_send(f"⏸ FloodWait: sleeping {wait}s")
+                    await asyncio.sleep(wait)
+                    continue
+                except Exception as e:
+                    bot_send(f"⚠️ Error: {e}, retrying in 10s")
+                    await asyncio.sleep(10)
+                    continue
+
+            s["last_offset"] = 0
+            s["last_count"] = 0
+            save_state(s)
             await c.disconnect()
+
         asyncio.run(inner())
         return True, f"Fetched {len(members)} members.", members
-    except FloodWaitError as fw:
-        return False, f"FloodWait {fw.seconds}s", members
     except Exception as e:
         return False, str(e), members
 
-# ---------- KEEP-ALIVE PING ----------
+# ---------- KEEP ALIVE ----------
 async def ping_forever():
     while True:
         try:
             requests.get(PING_URL, timeout=10)
             print("💓 Ping sent")
         except Exception as e:
-            print("Ping fail:", e)
+            print("Ping failed:", e)
         await asyncio.sleep(600)
 
 def start_ping_thread():
-    def run_ping():
-        try:
-            asyncio.run(ping_forever())
-        except Exception as e:
-            print("Ping thread ended:", e)
-    threading.Thread(target=run_ping, daemon=True).start()
+    def run():
+        asyncio.run(ping_forever())
+    threading.Thread(target=run, daemon=True).start()
 
-# ---------- COMMAND HANDLER ----------
+# ---------- COMMANDS ----------
 def process_cmd(text):
-    lower = text.lower().strip()
     s = load_state()
-
-    if lower.startswith("/start") or lower.startswith("/hello"):
-        bot_send("👋 Bot ready! Use /login → /otp → /fetch\nType /help for commands.")
+    lower = text.lower().strip()
+    if lower.startswith("/start"):
+        bot_send("👋 Ready! /login → /otp → /fetch")
         return
     if lower.startswith("/help"):
-        bot_send("/login\n/otp <code>\n/2fa <password>\n/fetch\n/status\n/users_count\n/ping")
-        return
-    if lower.startswith("/ping"):
-        bot_send("🏓 Pong!")
+        bot_send("/login\n/otp <code>\n/2fa <password>\n/fetch\n/status\n/users_count")
         return
     if lower.startswith("/login"):
-        tele_send_code()
-        return
+        tele_send_code(); return
     if lower.startswith("/otp"):
-        parts = text.split()
-        if len(parts) < 2:
-            bot_send("Usage: /otp <code>")
-            return
-        ok, need2fa, msg = tele_sign_in_with_code(parts[1])
+        p = text.split()
+        if len(p) < 2: bot_send("Usage: /otp <code>"); return
+        ok, need2fa, msg = tele_sign_in_with_code(p[1])
         bot_send(msg)
-        if need2fa:
-            bot_send("Now send /2fa <password>")
+        if need2fa: bot_send("Send /2fa <password>")
         return
     if lower.startswith("/2fa"):
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            bot_send("Usage: /2fa <password>")
-            return
-        ok, msg = tele_sign_in_with_password(parts[1])
+        p = text.split(maxsplit=1)
+        if len(p) < 2: bot_send("Usage: /2fa <password>"); return
+        ok, msg = tele_sign_in_with_password(p[1])
         bot_send(msg)
         return
     if lower.startswith("/fetch"):
         if not s.get("logged_in"):
-            bot_send("Please login first (/login + /otp).")
-            return
-        bot_send("🚀 Starting fetch, please wait. (85k+ supported)")
-        def cb(cnt): bot_send(f"✅ {cnt} users fetched...")
+            bot_send("Login first."); return
+        bot_send("Fetching members... (85k+ safe mode)")
+        def cb(c): bot_send(f"✅ {c} fetched so far...")
         ok, msg, members = tele_fetch_members(cb)
-        if not ok:
-            bot_send("❌ Error: " + msg)
-            return
+        if not ok: bot_send(f"Error: {msg}"); return
         with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["id", "username", "fname", "lname", "phone"])
             w.writerows(members)
-        bot_send_file(OUTPUT_CSV, f"Tutorial Members ({len(members)})")
-        bot_send("✅ Fetch complete.")
+        bot_send_file(OUTPUT_CSV, f"Total {len(members)} members")
+        bot_send("✅ Done!")
         return
     if lower.startswith("/status"):
-        bot_send(json.dumps(s, indent=2))
-        return
+        bot_send(json.dumps(s, indent=2)); return
     if lower.startswith("/users_count"):
         if os.path.exists(OUTPUT_CSV):
-            lines = sum(1 for _ in open(OUTPUT_CSV, "r", encoding="utf-8")) - 1
-            bot_send(f"Users in CSV: {lines}")
+            c = sum(1 for _ in open(OUTPUT_CSV, encoding="utf-8")) - 1
+            bot_send(f"{c} users in CSV")
         else:
-            bot_send("No CSV found.")
+            bot_send("No CSV yet")
         return
-    bot_send("Unknown command. Use /help")
+    bot_send("Unknown command")
 
 # ---------- MAIN LOOP ----------
 def main_loop():
-    print("🚀 Bot fetcher running (Render-safe)")
+    print("🚀 Bot started (85k fetch mode)")
     start_ping_thread()
     offset = None
     while True:
@@ -248,21 +257,17 @@ def main_loop():
                 params={"offset": offset, "timeout": 15},
                 timeout=20,
             ).json()
-            if not r.get("ok"):
-                time.sleep(1)
-                continue
-            for upd in r.get("result", []):
-                offset = upd["update_id"] + 1
-                msg = upd.get("message", {})
-                chat = msg.get("chat", {})
+            if not r.get("ok"): time.sleep(1); continue
+            for u in r["result"]:
+                offset = u["update_id"] + 1
+                msg = u.get("message", {})
                 text = msg.get("text", "")
-                if not text:
-                    continue
+                chat = msg.get("chat", {})
+                if not text: continue
                 if str(chat.get("id")) != str(USER_CHAT_ID):
-                    bot_send("Private bot 🔒")
-                    continue
+                    bot_send("Private bot 🔒"); continue
                 process_cmd(text)
-            time.sleep(0.5)
+            time.sleep(1)
         except Exception as e:
             print("Loop error:", e)
             time.sleep(2)
