@@ -1,3 +1,2 @@
---no-binary :all:
 telethon==1.37.0
 requests==2.32.3
