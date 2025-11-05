@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-✅ Final Telegram Member Fetcher (85k+ support, safe mode)
-✔️ Auto FloodWait handle (pause then continue)
-✔️ Resume from last fetched user
-✔️ Slow-safe delay (1–5 sec) prevents bans
-✔️ Works perfectly on Render (no port binding)
+✅ Final Telegram Member Fetcher (Telethon 1.35 compatible)
+✔ Uses get_participants() with offset pagination
+✔ Fetches 85k+ members safely with FloodWait recovery
+✔ Auto resume from last saved offset
+✔ Render-safe (no ports)
 """
 
 import os, time, json, csv, asyncio, random, threading, requests, traceback
@@ -55,7 +55,7 @@ def load_state():
 def save_state(s):
     json.dump(s, open(STATE_FILE, "w", encoding="utf-8"), indent=2)
 
-# ---------- TELEGRAM LOGIN ----------
+# ---------- LOGIN ----------
 def tele_send_code():
     try:
         async def inner():
@@ -126,16 +126,16 @@ def tele_fetch_members(progress_cb=None):
                 raise Exception("Not logged in.")
 
             s = load_state()
-            offset_id = s.get("last_offset", 0)
-            limit = 200
+            offset = s.get("last_offset", 0)
             total = s.get("last_count", 0)
+            limit = 200
 
-            bot_send(f"🔁 Resuming from offset {offset_id} ({total} users)")
+            bot_send(f"🔁 Resuming from offset {offset} ({total} users)")
 
             while True:
                 try:
                     participants = await c.get_participants(
-                        TUTORIAL_ID, offset_id=offset_id, limit=limit
+                        TUTORIAL_ID, offset=offset, limit=limit
                     )
                     if not participants:
                         break
@@ -150,8 +150,9 @@ def tele_fetch_members(progress_cb=None):
                         ])
 
                     total += len(participants)
-                    offset_id = participants[-1].id
-                    s["last_offset"] = offset_id
+                    offset += len(participants)
+
+                    s["last_offset"] = offset
                     s["last_count"] = total
                     save_state(s)
 
@@ -162,7 +163,7 @@ def tele_fetch_members(progress_cb=None):
 
                 except FloodWaitError as fw:
                     wait = fw.seconds + 5
-                    bot_send(f"⏸ FloodWait: sleeping {wait}s")
+                    bot_send(f"⏸ FloodWait: waiting {wait}s")
                     await asyncio.sleep(wait)
                     continue
                 except Exception as e:
@@ -180,7 +181,7 @@ def tele_fetch_members(progress_cb=None):
     except Exception as e:
         return False, str(e), members
 
-# ---------- KEEP ALIVE ----------
+# ---------- PING ----------
 async def ping_forever():
     while True:
         try:
@@ -247,7 +248,7 @@ def process_cmd(text):
 
 # ---------- MAIN LOOP ----------
 def main_loop():
-    print("🚀 Bot started (85k fetch mode)")
+    print("🚀 Bot started (85k fetch mode, Telethon 1.35)")
     start_ping_thread()
     offset = None
     while True:
