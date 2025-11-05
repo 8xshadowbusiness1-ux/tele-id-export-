@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-💎 FINAL TELEGRAM MEMBER FETCHER (90K+ VERSION)
-✔ FIXED: offset_id error
-✔ Multi-filter (A–Z) fetching
+💎 FINAL TELEGRAM MEMBER FETCHER (90K+ VERSION - RENDER FREE FIX)
+✔ FIXED: Added dummy Flask server to bind port for Render Web Service (free tier)
+✔ Multi-filter (A–Z) fetching for 90k+
 ✔ FloodWait & network retry handling
+✔ AuthRestartError retry in login
 ✔ Auto resume & ping for Render
 ✔ Compatible with Telethon 1.37+
 """
-
 import os, time, json, csv, asyncio, random, threading, requests, traceback
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError, AuthRestartError
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.types import ChannelParticipantsSearch
+from flask import Flask  # NEW: For dummy HTTP server
 
 # ---------------- CONFIG ----------------
 API_ID = 18085901
@@ -20,12 +21,19 @@ API_HASH = "baa5a6ca152c717e88ea45f888d3af74"
 PHONE = "+918436452250"
 BOT_TOKEN = "8254353086:AAEMim12HX44q0XYaFWpbB3J7cxm4VWprEc"
 USER_CHAT_ID = 1602198875
-TUTORIAL_ID = -1002647054427  # Your target channel/group ID
+TUTORIAL_ID = -1002647054427 # Your target channel/group ID
 OUTPUT_CSV = "tutorial_members.csv"
 STATE_FILE = "state.json"
 PROGRESS_BATCH = 500
 PING_URL = "https://teleautomation-by9o.onrender.com"
 # ----------------------------------------
+
+# NEW: Dummy Flask app to satisfy Render port binding (free Web Service)
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Telegram Bot is running! 🚀"
 
 # ---------- Telegram Bot Functions ----------
 def bot_send(text):
@@ -59,7 +67,7 @@ def load_state():
 def save_state(s):
     json.dump(s, open(STATE_FILE, "w", encoding="utf-8"), indent=2)
 
-# ---------- Login System ----------
+# ---------- Login System (FIXED: Retry on AuthRestartError) ----------
 def tele_send_code():
     async def inner():
         c = TelegramClient("session_bot", API_ID, API_HASH)
@@ -67,15 +75,25 @@ def tele_send_code():
         r = await c.send_code_request(PHONE)
         await c.disconnect()
         return getattr(r, "phone_code_hash", None)
-    try:
-        hashv = asyncio.run(inner())
-        s = load_state()
-        s["phone_code_hash"] = hashv
-        s["hash_time"] = int(time.time())
-        save_state(s)
-        bot_send("📲 OTP sent! Use /otp <code>")
-    except Exception as e:
-        bot_send(f"❌ send_code error: {e}")
+    
+    retries = 3
+    while retries > 0:
+        try:
+            hashv = asyncio.run(inner())
+            s = load_state()
+            s["phone_code_hash"] = hashv
+            s["hash_time"] = int(time.time())
+            save_state(s)
+            bot_send("📲 OTP sent! Use /otp <code>")
+            return
+        except AuthRestartError as e:
+            print(f"AuthRestartError: {e} - Retrying in 5s...")
+            time.sleep(5)
+            retries -= 1
+        except Exception as e:
+            bot_send(f"❌ send_code error: {e}")
+            return
+    bot_send("❌ Max retries exceeded for send_code.")
 
 def tele_sign_in_with_code(code):
     async def inner():
@@ -98,11 +116,19 @@ def tele_sign_in_with_code(code):
         except SessionPasswordNeededError:
             await c.disconnect()
             return (True, True, "🔐 2FA required.")
-    try:
-        ok, need2fa, msg = asyncio.run(inner())
-        return ok, need2fa, msg
-    except Exception as e:
-        return False, False, f"Error: {e}"
+    
+    retries = 3
+    while retries > 0:
+        try:
+            ok, need2fa, msg = asyncio.run(inner())
+            return ok, need2fa, msg
+        except AuthRestartError as e:
+            print(f"AuthRestartError in sign_in: {e} - Retrying...")
+            time.sleep(5)
+            retries -= 1
+        except Exception as e:
+            return False, False, f"Error: {e}"
+    return False, False, "Max retries exceeded."
 
 def tele_sign_in_with_password(pwd):
     async def inner():
@@ -113,11 +139,19 @@ def tele_sign_in_with_password(pwd):
         s["logged_in"] = True
         save_state(s)
         await c.disconnect()
-    try:
-        asyncio.run(inner())
-        return True, "2FA success."
-    except Exception as e:
-        return False, str(e)
+    
+    retries = 3
+    while retries > 0:
+        try:
+            asyncio.run(inner())
+            return True, "2FA success."
+        except AuthRestartError as e:
+            print(f"AuthRestartError in 2FA: {e} - Retrying...")
+            time.sleep(5)
+            retries -= 1
+        except Exception as e:
+            return False, str(e)
+    return False, "Max retries exceeded."
 
 # ---------- Multi-Filter Fetch System ----------
 def tele_fetch_members(progress_cb=None):
@@ -133,7 +167,7 @@ def tele_fetch_members(progress_cb=None):
         total = s.get("last_count", 0)
         limit = 200
 
-        filters = [""] + [chr(i) for i in range(97, 123)]  # '', a-z
+        filters = [""] + [chr(i) for i in range(97, 123)] # '', a-z
 
         for flt in filters:
             offset = 0
@@ -264,7 +298,6 @@ def process_cmd(text):
 # ---------- Main Loop ----------
 def main_loop():
     print("🚀 Bot started (Telethon 1.37+ | 90k+ mode active)")
-    start_ping_thread()
     offset = None
     while True:
         try:
@@ -293,4 +326,11 @@ def main_loop():
             time.sleep(3)
 
 if __name__ == "__main__":
-    main_loop()
+    # Start ping and bot in threads
+    start_ping_thread()
+    threading.Thread(target=main_loop, daemon=True).start()
+    
+    # Run dummy Flask server for Render port binding
+    port = int(os.environ.get('PORT', 10000))
+    print(f"Starting dummy HTTP server on port {port} for Render...")
+    app.run(host='0.0.0.0', port=port, debug=False)
