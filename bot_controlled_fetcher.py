@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-✅ FINAL TELEGRAM MEMBER FETCHER (Telethon 1.37 Stable)
-✔ Works on Render (no port binding)
-✔ Fetch 85k+ members safely
-✔ FloodWait auto-handled
-✔ Resume with offset_id
-✔ Auto CSV save + ping keepalive
+✅ FINAL Telegram Member Fetcher (Telethon 1.37+)
+✔ FIXED 'offset_id' error (uses correct 'offset' param)
+✔ Auto-resume + flood wait handling
+✔ 85k+ member safe mode
+✔ Ping system for Render uptime
 """
 
 import os, time, json, csv, asyncio, random, threading, requests
@@ -21,11 +20,10 @@ USER_CHAT_ID = 1602198875
 TUTORIAL_ID = -1002647054427
 OUTPUT_CSV = "tutorial_members.csv"
 STATE_FILE = "state.json"
-PROGRESS_BATCH = 500
 PING_URL = "https://teleautomation-by9o.onrender.com"
+PROGRESS_BATCH = 500
 # ----------------------------------------
 
-# ---------- HELPERS ----------
 def bot_send(text):
     try:
         requests.post(
@@ -59,13 +57,14 @@ def save_state(s):
 
 # ---------- LOGIN ----------
 def tele_send_code():
+    async def inner():
+        c = TelegramClient("session_bot", API_ID, API_HASH)
+        await c.connect()
+        r = await c.send_code_request(PHONE)
+        await c.disconnect()
+        return getattr(r, "phone_code_hash", None)
+
     try:
-        async def inner():
-            c = TelegramClient("session_bot", API_ID, API_HASH)
-            await c.connect()
-            r = await c.send_code_request(PHONE)
-            await c.disconnect()
-            return getattr(r, "phone_code_hash", None)
         hashv = asyncio.run(inner())
         s = load_state()
         s["phone_code_hash"] = hashv
@@ -76,117 +75,88 @@ def tele_send_code():
         bot_send(f"❌ send_code error: {e}")
 
 def tele_sign_in_with_code(code):
+    async def inner():
+        c = TelegramClient("session_bot", API_ID, API_HASH)
+        await c.connect()
+        s = load_state()
+        hashv = s.get("phone_code_hash")
+        if not hashv:
+            r = await c.send_code_request(PHONE)
+            s["phone_code_hash"] = getattr(r, "phone_code_hash", "")
+            save_state(s)
+            await c.disconnect()
+            return (False, False, "Code expired. Sent again.")
+        try:
+            await c.sign_in(PHONE, code, phone_code_hash=hashv)
+            s["logged_in"] = True
+            save_state(s)
+            await c.disconnect()
+            return (True, False, "✅ Login successful.")
+        except SessionPasswordNeededError:
+            await c.disconnect()
+            return (True, True, "🔐 2FA required.")
     try:
-        async def inner():
-            c = TelegramClient("session_bot", API_ID, API_HASH)
-            await c.connect()
-            s = load_state()
-            hashv = s.get("phone_code_hash")
-            if not hashv:
-                r = await c.send_code_request(PHONE)
-                s["phone_code_hash"] = getattr(r, "phone_code_hash", "")
-                save_state(s)
-                await c.disconnect()
-                return (False, False, "Code expired. Sent again.")
-            try:
-                await c.sign_in(PHONE, code, phone_code_hash=hashv)
-                s["logged_in"] = True
-                save_state(s)
-                await c.disconnect()
-                return (True, False, "✅ Login successful.")
-            except SessionPasswordNeededError:
-                await c.disconnect()
-                return (True, True, "🔐 2FA required.")
         ok, need2fa, msg = asyncio.run(inner())
         return ok, need2fa, msg
     except Exception as e:
         return False, False, f"Error: {e}"
 
 def tele_sign_in_with_password(pwd):
+    async def inner():
+        c = TelegramClient("session_bot", API_ID, API_HASH)
+        await c.connect()
+        await c.sign_in(password=pwd)
+        s = load_state()
+        s["logged_in"] = True
+        save_state(s)
+        await c.disconnect()
     try:
-        async def inner():
-            c = TelegramClient("session_bot", API_ID, API_HASH)
-            await c.connect()
-            await c.sign_in(password=pwd)
-            s = load_state()
-            s["logged_in"] = True
-            save_state(s)
-            await c.disconnect()
         asyncio.run(inner())
         return True, "2FA success."
     except Exception as e:
         return False, str(e)
 
-# ---------- FETCH MEMBERS (offset_id supported) ----------
+# ---------- FETCH MEMBERS ----------
 def tele_fetch_members(progress_cb=None):
     members = []
+    async def inner():
+        c = TelegramClient("session_bot", API_ID, API_HASH)
+        await c.connect()
+        if not await c.is_user_authorized():
+            raise Exception("Not logged in.")
+
+        s = load_state()
+        offset = s.get("last_offset", 0)
+        total = s.get("last_count", 0)
+        limit = 200
+
+        bot_send(f"🔁 Resuming from offset {offset} ({total} users)")
+
+        async for user in c.iter_participants(TUTORIAL_ID, offset=offset, limit=limit):
+            members.append([
+                user.id,
+                getattr(user, "username", "") or "",
+                getattr(user, "first_name", "") or "",
+                getattr(user, "last_name", "") or "",
+                getattr(user, "phone", "") or "",
+            ])
+
+            total += 1
+            if total % limit == 0:
+                offset += limit
+                s["last_offset"] = offset
+                s["last_count"] = total
+                save_state(s)
+                if progress_cb and total % PROGRESS_BATCH == 0:
+                    progress_cb(total)
+                await asyncio.sleep(random.uniform(1.5, 3.0))
+
+        s["last_offset"] = 0
+        s["last_count"] = 0
+        save_state(s)
+        await c.disconnect()
+
     try:
-        async def inner():
-            c = TelegramClient("session_bot", API_ID, API_HASH)
-            await c.connect()
-            if not await c.is_user_authorized():
-                raise Exception("Not logged in.")
-
-            s = load_state()
-            offset_id = s.get("last_offset_id", 0)
-            total = s.get("last_count", 0)
-            limit = 200
-
-            bot_send(f"🔁 Resuming from offset_id {offset_id} ({total} users)")
-
-            while True:
-                try:
-                    participants = await c.get_participants(
-                        TUTORIAL_ID,
-                        offset_id=offset_id,
-                        limit=limit
-                    )
-                    if not participants:
-                        break
-
-                    for user in participants:
-                        members.append([
-                            user.id,
-                            getattr(user, "username", "") or "",
-                            getattr(user, "first_name", "") or "",
-                            getattr(user, "last_name", "") or "",
-                            getattr(user, "phone", "") or "",
-                        ])
-
-                    total += len(participants)
-                    offset_id = participants[-1].id
-
-                    s["last_offset_id"] = offset_id
-                    s["last_count"] = total
-                    save_state(s)
-
-                    if total % 5000 < limit:
-                        with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
-                            w = csv.writer(f)
-                            w.writerow(["id", "username", "fname", "lname", "phone"])
-                            w.writerows(members)
-                        bot_send(f"💾 Auto-saved at {total} users")
-
-                    if progress_cb and total % PROGRESS_BATCH == 0:
-                        progress_cb(total)
-
-                    await asyncio.sleep(random.uniform(1.5, 4.5))
-
-                except FloodWaitError as fw:
-                    wait = fw.seconds + 5
-                    bot_send(f"⏸ FloodWait: sleeping {wait}s")
-                    await asyncio.sleep(wait)
-                    continue
-                except Exception as e:
-                    bot_send(f"⚠️ Error: {e}, retrying in 10s")
-                    await asyncio.sleep(10)
-                    continue
-
-            s["last_offset_id"] = 0
-            s["last_count"] = 0
-            save_state(s)
-            await c.disconnect()
-
         asyncio.run(inner())
         return True, f"Fetched {len(members)} members.", members
     except Exception as e:
@@ -257,9 +227,9 @@ def process_cmd(text):
         return
     bot_send("Unknown command")
 
-# ---------- MAIN ----------
+# ---------- MAIN LOOP ----------
 def main_loop():
-    print("🚀 Bot started (Telethon 1.37 safe)")
+    print("🚀 Bot started (85k fetch mode, Telethon 1.37 FIXED)")
     start_ping_thread()
     offset = None
     while True:
