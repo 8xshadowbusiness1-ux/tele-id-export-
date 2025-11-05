@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-✅ FINAL TELEGRAM MEMBER FETCHER (Telethon 1.35.0 Stable)
+✅ FINAL TELEGRAM MEMBER FETCHER (Telethon 1.37 Stable)
+✔ Works on Render (no port binding)
 ✔ Fetch 85k+ members safely
 ✔ FloodWait auto-handled
-✔ Resume system with offset
-✔ Auto CSV save
-✔ Render-safe ping system
+✔ Resume with offset_id
+✔ Auto CSV save + ping keepalive
 """
 
 import os, time, json, csv, asyncio, random, threading, requests
@@ -57,7 +57,7 @@ def load_state():
 def save_state(s):
     json.dump(s, open(STATE_FILE, "w", encoding="utf-8"), indent=2)
 
-# ---------- TELEGRAM LOGIN ----------
+# ---------- LOGIN ----------
 def tele_send_code():
     try:
         async def inner():
@@ -117,7 +117,7 @@ def tele_sign_in_with_password(pwd):
     except Exception as e:
         return False, str(e)
 
-# ---------- FETCH MEMBERS (Telethon 1.35 stable) ----------
+# ---------- FETCH MEMBERS (offset_id supported) ----------
 def tele_fetch_members(progress_cb=None):
     members = []
     try:
@@ -128,17 +128,17 @@ def tele_fetch_members(progress_cb=None):
                 raise Exception("Not logged in.")
 
             s = load_state()
-            offset = s.get("last_offset", 0)
+            offset_id = s.get("last_offset_id", 0)
             total = s.get("last_count", 0)
             limit = 200
 
-            bot_send(f"🔁 Resuming from offset {offset} ({total} users)")
+            bot_send(f"🔁 Resuming from offset_id {offset_id} ({total} users)")
 
             while True:
                 try:
                     participants = await c.get_participants(
                         TUTORIAL_ID,
-                        offset=offset,
+                        offset_id=offset_id,
                         limit=limit
                     )
                     if not participants:
@@ -154,9 +154,9 @@ def tele_fetch_members(progress_cb=None):
                         ])
 
                     total += len(participants)
-                    offset += len(participants)
+                    offset_id = participants[-1].id
 
-                    s["last_offset"] = offset
+                    s["last_offset_id"] = offset_id
                     s["last_count"] = total
                     save_state(s)
 
@@ -174,7 +174,7 @@ def tele_fetch_members(progress_cb=None):
 
                 except FloodWaitError as fw:
                     wait = fw.seconds + 5
-                    bot_send(f"⏸ FloodWait: waiting {wait}s")
+                    bot_send(f"⏸ FloodWait: sleeping {wait}s")
                     await asyncio.sleep(wait)
                     continue
                 except Exception as e:
@@ -182,7 +182,7 @@ def tele_fetch_members(progress_cb=None):
                     await asyncio.sleep(10)
                     continue
 
-            s["last_offset"] = 0
+            s["last_offset_id"] = 0
             s["last_count"] = 0
             save_state(s)
             await c.disconnect()
@@ -192,7 +192,7 @@ def tele_fetch_members(progress_cb=None):
     except Exception as e:
         return False, str(e), members
 
-# ---------- PING KEEP-ALIVE ----------
+# ---------- PING ----------
 async def ping_forever():
     while True:
         try:
@@ -207,7 +207,7 @@ def start_ping_thread():
         asyncio.run(ping_forever())
     threading.Thread(target=run, daemon=True).start()
 
-# ---------- COMMAND HANDLER ----------
+# ---------- COMMANDS ----------
 def process_cmd(text):
     s = load_state()
     lower = text.lower().strip()
@@ -257,9 +257,9 @@ def process_cmd(text):
         return
     bot_send("Unknown command")
 
-# ---------- MAIN LOOP ----------
+# ---------- MAIN ----------
 def main_loop():
-    print("🚀 Bot started (85k fetch mode, Telethon 1.35)")
+    print("🚀 Bot started (Telethon 1.37 safe)")
     start_ping_thread()
     offset = None
     while True:
