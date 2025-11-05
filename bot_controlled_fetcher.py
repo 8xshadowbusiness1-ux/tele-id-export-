@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-✅ FINAL TELEGRAM MEMBER FETCHER (Telethon 1.35 compatible)
-✔ Fetches 85k+ members (slow-safe)
-✔ FloodWait auto-handle
-✔ Resume from last offset_id
-✔ Auto CSV saving
-✔ Render ping (keep-alive)
+✅ FINAL TELEGRAM MEMBER FETCHER (Telethon 1.35.0 Stable)
+✔ Fetch 85k+ members safely
+✔ FloodWait auto-handled
+✔ Resume system with offset
+✔ Auto CSV save
+✔ Render-safe ping system
 """
 
-import os, time, json, csv, asyncio, random, threading, requests, traceback
+import os, time, json, csv, asyncio, random, threading, requests
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
 
@@ -25,7 +25,7 @@ PROGRESS_BATCH = 500
 PING_URL = "https://teleautomation-by9o.onrender.com"
 # ----------------------------------------
 
-# ---------- BASIC HELPERS ----------
+# ---------- HELPERS ----------
 def bot_send(text):
     try:
         requests.post(
@@ -117,7 +117,7 @@ def tele_sign_in_with_password(pwd):
     except Exception as e:
         return False, str(e)
 
-# ---------- FETCH MEMBERS (Final 85k+ version) ----------
+# ---------- FETCH MEMBERS (Telethon 1.35 stable) ----------
 def tele_fetch_members(progress_cb=None):
     members = []
     try:
@@ -128,17 +128,17 @@ def tele_fetch_members(progress_cb=None):
                 raise Exception("Not logged in.")
 
             s = load_state()
-            offset_id = s.get("last_offset_id", 0)
+            offset = s.get("last_offset", 0)
             total = s.get("last_count", 0)
             limit = 200
 
-            bot_send(f"🔁 Resuming from offset_id {offset_id} ({total} users)")
+            bot_send(f"🔁 Resuming from offset {offset} ({total} users)")
 
             while True:
                 try:
                     participants = await c.get_participants(
                         TUTORIAL_ID,
-                        offset_id=offset_id,
+                        offset=offset,
                         limit=limit
                     )
                     if not participants:
@@ -154,14 +154,12 @@ def tele_fetch_members(progress_cb=None):
                         ])
 
                     total += len(participants)
-                    offset_id = participants[-1].id
+                    offset += len(participants)
 
-                    # Save resume info
-                    s["last_offset_id"] = offset_id
+                    s["last_offset"] = offset
                     s["last_count"] = total
                     save_state(s)
 
-                    # Save partial CSV every 5k
                     if total % 5000 < limit:
                         with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
                             w = csv.writer(f)
@@ -169,7 +167,6 @@ def tele_fetch_members(progress_cb=None):
                             w.writerows(members)
                         bot_send(f"💾 Auto-saved at {total} users")
 
-                    # Progress report
                     if progress_cb and total % PROGRESS_BATCH == 0:
                         progress_cb(total)
 
@@ -177,7 +174,7 @@ def tele_fetch_members(progress_cb=None):
 
                 except FloodWaitError as fw:
                     wait = fw.seconds + 5
-                    bot_send(f"⏸ FloodWait: sleeping {wait}s")
+                    bot_send(f"⏸ FloodWait: waiting {wait}s")
                     await asyncio.sleep(wait)
                     continue
                 except Exception as e:
@@ -185,7 +182,7 @@ def tele_fetch_members(progress_cb=None):
                     await asyncio.sleep(10)
                     continue
 
-            s["last_offset_id"] = 0
+            s["last_offset"] = 0
             s["last_count"] = 0
             save_state(s)
             await c.disconnect()
@@ -210,7 +207,7 @@ def start_ping_thread():
         asyncio.run(ping_forever())
     threading.Thread(target=run, daemon=True).start()
 
-# ---------- COMMANDS ----------
+# ---------- COMMAND HANDLER ----------
 def process_cmd(text):
     s = load_state()
     lower = text.lower().strip()
