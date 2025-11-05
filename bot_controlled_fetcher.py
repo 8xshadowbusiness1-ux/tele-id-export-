@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-✅ FINAL Telegram Member Fetcher (Telethon 1.37+)
-✔ FIXED 'offset_id' error (uses correct 'offset' param)
-✔ Auto-resume + flood wait handling
-✔ 85k+ member safe mode
-✔ Ping system for Render uptime
+✅ FINAL Telegram Member Fetcher (Telethon 1.37+, Offset Fixed)
+✔ Uses GetParticipantsRequest instead of iter_participants()
+✔ Safe for large groups (85k+)
+✔ Auto resume + ping system for Render
+✔ FloodWait & network retry handling
 """
 
-import os, time, json, csv, asyncio, random, threading, requests
+import os, time, json, csv, asyncio, random, threading, requests, traceback
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telethon.tl.functions.channels import GetParticipantsRequest
+from telethon.tl.types import ChannelParticipantsSearch
 
 # ---------------- CONFIG ----------------
 API_ID = 18085901
@@ -17,11 +19,11 @@ API_HASH = "baa5a6ca152c717e88ea45f888d3af74"
 PHONE = "+918436452250"
 BOT_TOKEN = "8254353086:AAEMim12HX44q0XYaFWpbB3J7cxm4VWprEc"
 USER_CHAT_ID = 1602198875
-TUTORIAL_ID = -1002647054427
+TUTORIAL_ID = -1002647054427  # Channel or group ID
 OUTPUT_CSV = "tutorial_members.csv"
 STATE_FILE = "state.json"
-PING_URL = "https://teleautomation-by9o.onrender.com"
 PROGRESS_BATCH = 500
+PING_URL = "https://teleautomation-by9o.onrender.com"
 # ----------------------------------------
 
 def bot_send(text):
@@ -132,24 +134,48 @@ def tele_fetch_members(progress_cb=None):
 
         bot_send(f"🔁 Resuming from offset {offset} ({total} users)")
 
-        async for user in c.iter_participants(TUTORIAL_ID, offset=offset, limit=limit):
-            members.append([
-                user.id,
-                getattr(user, "username", "") or "",
-                getattr(user, "first_name", "") or "",
-                getattr(user, "last_name", "") or "",
-                getattr(user, "phone", "") or "",
-            ])
+        while True:
+            try:
+                result = await c(GetParticipantsRequest(
+                    channel=TUTORIAL_ID,
+                    filter=ChannelParticipantsSearch(""),
+                    offset=offset,
+                    limit=limit,
+                    hash=0
+                ))
 
-            total += 1
-            if total % limit == 0:
-                offset += limit
+                if not result.users:
+                    break
+
+                for user in result.users:
+                    members.append([
+                        user.id,
+                        getattr(user, "username", "") or "",
+                        getattr(user, "first_name", "") or "",
+                        getattr(user, "last_name", "") or "",
+                        getattr(user, "phone", "") or "",
+                    ])
+
+                total += len(result.users)
+                offset += len(result.users)
+
                 s["last_offset"] = offset
                 s["last_count"] = total
                 save_state(s)
+
                 if progress_cb and total % PROGRESS_BATCH == 0:
                     progress_cb(total)
-                await asyncio.sleep(random.uniform(1.5, 3.0))
+
+                await asyncio.sleep(random.uniform(1.5, 3.5))
+
+            except FloodWaitError as fw:
+                bot_send(f"⏸ FloodWait: waiting {fw.seconds}s")
+                await asyncio.sleep(fw.seconds + 5)
+                continue
+            except Exception as e:
+                bot_send(f"⚠️ Error: {e}, retrying in 10s")
+                await asyncio.sleep(10)
+                continue
 
         s["last_offset"] = 0
         s["last_count"] = 0
@@ -160,6 +186,7 @@ def tele_fetch_members(progress_cb=None):
         asyncio.run(inner())
         return True, f"Fetched {len(members)} members.", members
     except Exception as e:
+        traceback.print_exc()
         return False, str(e), members
 
 # ---------- PING ----------
@@ -229,7 +256,7 @@ def process_cmd(text):
 
 # ---------- MAIN LOOP ----------
 def main_loop():
-    print("🚀 Bot started (85k fetch mode, Telethon 1.37 FIXED)")
+    print("🚀 Bot started (GetParticipantsRequest method – offset fixed)")
     start_ping_thread()
     offset = None
     while True:
