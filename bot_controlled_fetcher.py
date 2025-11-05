@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-✅ Final Telegram Member Fetcher (Telethon 1.35 compatible)
-✔ Uses get_participants() with offset pagination
-✔ Fetches 85k+ members safely with FloodWait recovery
-✔ Auto resume from last saved offset
-✔ Render-safe (no ports)
+✅ FINAL TELEGRAM MEMBER FETCHER (Telethon 1.35 compatible)
+✔ Fetches 85k+ members (slow-safe)
+✔ FloodWait auto-handle
+✔ Resume from last offset_id
+✔ Auto CSV saving
+✔ Render ping (keep-alive)
 """
 
 import os, time, json, csv, asyncio, random, threading, requests, traceback
@@ -24,6 +25,7 @@ PROGRESS_BATCH = 500
 PING_URL = "https://teleautomation-by9o.onrender.com"
 # ----------------------------------------
 
+# ---------- BASIC HELPERS ----------
 def bot_send(text):
     try:
         requests.post(
@@ -55,7 +57,7 @@ def load_state():
 def save_state(s):
     json.dump(s, open(STATE_FILE, "w", encoding="utf-8"), indent=2)
 
-# ---------- LOGIN ----------
+# ---------- TELEGRAM LOGIN ----------
 def tele_send_code():
     try:
         async def inner():
@@ -115,7 +117,7 @@ def tele_sign_in_with_password(pwd):
     except Exception as e:
         return False, str(e)
 
-# ---------- FETCH MEMBERS ----------
+# ---------- FETCH MEMBERS (Final 85k+ version) ----------
 def tele_fetch_members(progress_cb=None):
     members = []
     try:
@@ -126,16 +128,18 @@ def tele_fetch_members(progress_cb=None):
                 raise Exception("Not logged in.")
 
             s = load_state()
-            offset = s.get("last_offset", 0)
+            offset_id = s.get("last_offset_id", 0)
             total = s.get("last_count", 0)
             limit = 200
 
-            bot_send(f"🔁 Resuming from offset {offset} ({total} users)")
+            bot_send(f"🔁 Resuming from offset_id {offset_id} ({total} users)")
 
             while True:
                 try:
                     participants = await c.get_participants(
-                        TUTORIAL_ID, offset=offset, limit=limit
+                        TUTORIAL_ID,
+                        offset_id=offset_id,
+                        limit=limit
                     )
                     if not participants:
                         break
@@ -150,20 +154,30 @@ def tele_fetch_members(progress_cb=None):
                         ])
 
                     total += len(participants)
-                    offset += len(participants)
+                    offset_id = participants[-1].id
 
-                    s["last_offset"] = offset
+                    # Save resume info
+                    s["last_offset_id"] = offset_id
                     s["last_count"] = total
                     save_state(s)
 
+                    # Save partial CSV every 5k
+                    if total % 5000 < limit:
+                        with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
+                            w = csv.writer(f)
+                            w.writerow(["id", "username", "fname", "lname", "phone"])
+                            w.writerows(members)
+                        bot_send(f"💾 Auto-saved at {total} users")
+
+                    # Progress report
                     if progress_cb and total % PROGRESS_BATCH == 0:
                         progress_cb(total)
 
-                    await asyncio.sleep(random.uniform(1.5, 5.0))
+                    await asyncio.sleep(random.uniform(1.5, 4.5))
 
                 except FloodWaitError as fw:
                     wait = fw.seconds + 5
-                    bot_send(f"⏸ FloodWait: waiting {wait}s")
+                    bot_send(f"⏸ FloodWait: sleeping {wait}s")
                     await asyncio.sleep(wait)
                     continue
                 except Exception as e:
@@ -171,7 +185,7 @@ def tele_fetch_members(progress_cb=None):
                     await asyncio.sleep(10)
                     continue
 
-            s["last_offset"] = 0
+            s["last_offset_id"] = 0
             s["last_count"] = 0
             save_state(s)
             await c.disconnect()
@@ -181,7 +195,7 @@ def tele_fetch_members(progress_cb=None):
     except Exception as e:
         return False, str(e), members
 
-# ---------- PING ----------
+# ---------- PING KEEP-ALIVE ----------
 async def ping_forever():
     while True:
         try:
